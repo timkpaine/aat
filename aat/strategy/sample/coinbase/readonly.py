@@ -1,6 +1,6 @@
 from pprint import pprint
-from typing import Any
-from aat import Strategy, Event, Instrument, InstrumentType
+from typing import Any, cast
+from aat import Strategy, Event, Instrument, InstrumentType, Trade
 
 
 class ReadOnlyStrategy(Strategy):
@@ -15,10 +15,7 @@ class ReadOnlyStrategy(Strategy):
 
     async def onTrade(self, event: Event) -> None:
         pprint(event)
-
-    async def onOrder(self, event: Event) -> None:
-        # pprint(event)
-        pass
+        pprint(await self.book(cast(Trade, event.target).instrument))
 
     async def onExit(self, event: Event) -> None:
         print("Finishing...")
