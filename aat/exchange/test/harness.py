@@ -31,7 +31,7 @@ class Harness(Exchange):
         pass
 
     async def tick(self) -> AsyncGenerator[Any, Event]:  # type: ignore[override]
-        now = self._start
+        self._now = self._start
         for i in range(1000):
             if self._client_order:
                 self._client_order.filled = self._client_order.volume
@@ -41,7 +41,7 @@ class Harness(Exchange):
                     taker_order=self._client_order,
                     maker_orders=[],
                 )
-                t.taker_order.timestamp = now
+                t.taker_order.timestamp = self._now
                 self._client_order = None
                 yield Event(type=EventType.TRADE, target=t)
                 continue
@@ -52,17 +52,18 @@ class Harness(Exchange):
                 Side.BUY,
                 self._instrument,
                 self.exchange(),
-                timestamp=now,
+                timestamp=self._now,
                 filled=1,
             )
-            t = Trade(1, i, o, [])
+            t = Trade(1, i, taker_order=o, maker_orders=[])
             yield Event(type=EventType.TRADE, target=t)
-            now += timedelta(minutes=30)
+            self._now += timedelta(minutes=30)
 
     async def newOrder(self, order: Order) -> bool:
         order.id = str(self._id)
         self._id += 1
         self._client_order = order
+        order.timestamp = self._now
         return True
 
 
@@ -73,25 +74,36 @@ class TestStrategy(Strategy):
         self._trades: List[Trade] = []
 
     async def onStart(self, event: Event) -> None:
-        self.periodic(self.onPeriodic, second=0, minute=30)
+        self.at(self.onPeriodic, second=0, minute=0)
 
     async def onTrade(self, event: Event) -> None:
-        pass
+        # print("onTrade {}".format(event.target.timestamp))
+        ...
 
     async def onTraded(self, event: Event) -> None:
+        # print("onTraded {}".format(event.target.timestamp))
         self._trades.append(event.target)  # type: ignore
 
     async def onPeriodic(self, **kwargs: Any) -> None:
+        # print("onPeriodic {}".format(kwargs.get("timestamp")))
         o = Order(1, 1, Side.BUY, self.instruments()[0], ExchangeType("testharness"))
         _ = await self.newOrder(o)
         self._orders.append(o)
 
     async def onExit(self, event: Event) -> None:
+        print(
+            len(self._orders),
+            len(self._trades),
+            self._trades[0].price,
+            self._trades[1].price,
+            self._trades[-1].price,
+        )
         assert len(self._orders) == len(self._trades)
         assert len(self._trades) == 334
-        assert self._trades[0].price == 2
-        assert self._trades[1].price == 3
+        assert self._trades[0].price == 1
+        assert self._trades[1].price == 2
         assert self._trades[-1].price == 999
+        print("all good")
 
 
 if __name__ == "__main__":

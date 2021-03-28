@@ -62,4 +62,5 @@ if __name__ == "__main__":
     print(cfg)
     t = TradingEngine(**cfg)
     t.start()
+    print(t.strategies[0]._received_count)
     assert t.strategies[0]._received_count == 64

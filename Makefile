@@ -44,7 +44,11 @@ testpycpp: ## Make unit tests
 testjs:  ## Make js tests
 	cd js; yarn test
 
-testruns:  testrunscsv testrunsiex ## Run a few examples as a live end-to-end test
+testruns:  testrunscsv testrunsiex testrunsother ## Run a few examples as a live end-to-end test
+
+testrunsother:
+	$(PYTHON) -m aat.exchange.test.harness
+	$(PYTHON) -m aat.tests.exchange.test_ib_race
 
 testrunscsv:
 	$(PYTHON) -m aat.strategy.sample.csv.readonly

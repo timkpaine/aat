@@ -77,11 +77,11 @@ class CSV(Exchange):
                     price=order.price,
                     taker_order=order,
                     maker_orders=[],
-                    my_order=order,
+                    my_order=order,  # FIXME this isnt technically necessary as
+                    # the engine should do this automatically
                 )
 
                 yield Event(type=EventType.TRADE, target=t)
-                await asyncio.sleep(0)
 
     async def cancelOrder(self, order: Order) -> bool:
         # Can't cancel, orders execute immediately

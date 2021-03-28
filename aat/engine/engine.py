@@ -2,7 +2,9 @@ import asyncio
 import inspect
 import os
 import os.path
+import pytz
 
+from asyncio import Future, Queue
 from aiostream.stream import merge  # type: ignore
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -69,6 +71,12 @@ class TradingEngine(Application):
     verbose = Bool(default_value=True)
     api = Bool(default_value=False)
     port = Unicode(default_value="8080", help="Port to run on").tag(config=True)
+    tz = Instance(
+        klass=pytz.BaseTzInfo,
+        default_value=None,
+        allow_none=True,
+        help="Timezone to localize to",
+    ).tag(config=True)
     event_loop = Instance(klass=asyncio.events.AbstractEventLoop)
     executor = Instance(klass=ThreadPoolExecutor, args=(4,), kwargs={})
 
@@ -119,6 +127,13 @@ class TradingEngine(Application):
         # enable API access?
         self.api = bool(int(config.get("general", {}).get("api", self.api)))
 
+        # override timezome
+        self.tz = (
+            pytz.timezone(config.get("general", {}).get("timezone", None))
+            if config.get("general", {}).get("timezone", None)
+            else None
+        )
+
         # Trading type
         self.trading_type = TradingType(
             config.get("general", {}).get("trading_type", "simulation").upper()
@@ -147,12 +162,14 @@ class TradingEngine(Application):
         self.event_loop = asyncio.get_event_loop()
 
         # setup subscriptions
-        self._handler_subscriptions: Dict[EventType, List] = {
+        self._handler_subscriptions: Dict[EventType, ListType] = {
             m: [] for m in EventType.__members__.values()
         }
 
         # setup `now` handler for backtest
-        self._latest = datetime.fromtimestamp(0) if self._offline() else datetime.now()
+        self._latest = (
+            datetime.fromtimestamp(0, tz=self.tz) if self._offline() else datetime.now()
+        )
 
         # register internal management event handler before all strategy handlers
         self.registerHandler(self.manager)
@@ -318,26 +335,32 @@ class TradingEngine(Application):
             return True
         return False
 
-    def pushEvent(self, event: Event) -> None:
+    async def pushEvent(self, event: Event) -> None:
         """push non-exchange event into the queue"""
-        self._queued_events.append(event)
+        await self._queued_events.put(event)
 
-    def pushTargetedEvent(self, strategy: Strategy, event: Event) -> None:
+    async def pushTargetedEvent(self, strategy: Strategy, event: Event) -> None:
         """push non-exchange event targeted to a specific strat into the queue"""
-        self._queued_targeted_events.append((strategy, event))
+        await self._queued_targeted_events.put((event, strategy))
+
+    async def _wraptick(self, ticker) -> Event:  # type: ignore
+        async for ev in ticker:
+            yield ev
+        yield Event(type=EventType.EXIT, target=None)
 
     async def run(self) -> None:
         """run the engine"""
         # setup future queue
-        self._queued_events: Deque[Event] = deque()
-        self._queued_targeted_events: Deque[Tuple[Strategy, Event]] = deque()
+        self._queued_events: Queue[Event] = Queue()
+        self._queued_targeted_events: Queue[Tuple[Event, Strategy]] = Queue()
+        self._futures: Deque[Future] = deque()
 
         # await all connections
         await asyncio.gather(
-            *(asyncio.create_task(exch.connect()) for exch in self.exchanges)
+            *(asyncio.ensure_future(exch.connect()) for exch in self.exchanges)
         )
         await asyncio.gather(
-            *(asyncio.create_task(exch.instruments()) for exch in self.exchanges)
+            *(asyncio.ensure_future(exch.instruments()) for exch in self.exchanges)
         )
 
         # send start event to all callbacks
@@ -347,16 +370,40 @@ class TradingEngine(Application):
         # Main event loop
         # **************** #
         async with merge(
+            self._tick_queued_events(),
+            self._tick_queued_targeted_events(),
             *(
-                exch.tick()
+                self._wraptick(exch.tick())
                 for exch in self.exchanges + [self]
                 if inspect.isasyncgenfunction(exch.tick)
-            )
+            ),
         ).stream() as stream:
             # stream through all events
             async for event in stream:
+                # unpack targetted events
+                if isinstance(event, tuple):
+                    event, strategy = event
+                else:
+                    strategy = None
+
+                # if done event
+                if event.type == EventType.EXIT:
+                    break
+
                 # TODO move out of critical path
                 if self._offline():
+                    # handle timezone
+                    if (
+                        hasattr(event, "target")
+                        and hasattr(event.target, "timestamp")
+                        and self._latest.tzinfo
+                        and not event.target.timestamp.tzinfo
+                    ):
+                        # assume in local time
+                        event.target.timestamp = event.target.timestamp.replace(
+                            tzinfo=self._latest.tzinfo
+                        )
+
                     # inject periodics
                     # TODO optimize
                     # Manager should keep track of the intervals for its periodics,
@@ -364,7 +411,7 @@ class TradingEngine(Application):
                     # live engine's `tick` method does below). Instead we can just
                     # calculate exactly the intervals
                     if (
-                        self._latest != datetime.fromtimestamp(0)
+                        self._latest != datetime.fromtimestamp(0, tz=self.tz)
                         and hasattr(event, "target")
                         and hasattr(event.target, "timestamp")
                     ):
@@ -378,6 +425,9 @@ class TradingEngine(Application):
                                 / intervals
                             )
                         ):
+                            print(
+                                "{} - {}".format(event.target.timestamp, self._latest)
+                            )
                             self._latest = self._latest + timedelta(
                                 seconds=1 * intervals
                             )
@@ -394,7 +444,7 @@ class TradingEngine(Application):
                                 )
 
                 # tick exchange event to handlers
-                await self.processEvent(event)
+                self._futures.extend(await self.processEvent(event, strategy))
 
                 # TODO move out of critical path
                 if self._offline():
@@ -407,47 +457,51 @@ class TradingEngine(Application):
                     )
                 else:
                     # use now
-                    self._latest = datetime.now()
-
-                # process any secondary events
-                while self._queued_events:
-                    event = self._queued_events.popleft()
-                    await self.processEvent(event)
-
-                # process any secondary callback-targeted events (e.g. order fills)
-                # these need to route to a specific callback,
-                # rather than all callbacks
-                while self._queued_targeted_events:
-                    strat, event = self._queued_targeted_events.popleft()
-
-                    # send to the generating strategy
-                    await self.processEvent(event, strat)
+                    self._latest = datetime.now(tz=self.tz)
 
                 # process any periodics
-                periodic_result = await asyncio.gather(
-                    *(
+                self._futures.extend(
+                    [
                         asyncio.create_task(p.execute(self._latest))
                         for p in self.manager.periodics()
                         if p.expires(self._latest)
-                    )
+                    ]
                 )
 
-                exceptions = [r for r in periodic_result if r.exception()]
-                if any(exceptions):
-                    raise exceptions[0].exception()
+                remaining_futures: Deque[Future] = deque()
+                for fut in self._futures:
+                    if fut.done():
+                        # trigger exception if necessary
+                        fut.result()
+                    else:
+                        remaining_futures.append(fut)
+                self._futures = remaining_futures
 
         # Before engine shutdown, send an exit event
         await self.processEvent(Event(type=EventType.EXIT, target=None))
 
-    async def processEvent(self, event: Event, strategy: Strategy = None) -> None:
+    async def _tick_queued_events(self) -> AsyncGenerator[Event, None]:
+        while True:
+            yield await self._queued_events.get()
+
+    async def _tick_queued_targeted_events(
+        self,
+    ) -> AsyncGenerator[Tuple[Event, Strategy], None]:
+        while True:
+            yield await self._queued_targeted_events.get()
+
+    async def processEvent(
+        self, event: Event, strategy: Strategy = None
+    ) -> ListType[Future]:
         """send an event to all registered event handlers
 
         Arguments:
             event (Event): event to send
         """
+        ret: ListType[Future] = []
         if event.type == EventType.HEARTBEAT:
             # ignore heartbeat
-            return
+            return ret
 
         for callback, handler in self._handler_subscriptions[event.type]:
             # TODO make cleaner? move to somewhere not in critical path?
@@ -469,7 +523,7 @@ class TradingEngine(Application):
                 continue
 
             try:
-                await callback(event)
+                ret.append(asyncio.ensure_future(callback(event)))
             except KeyboardInterrupt:
                 raise
             except SystemExit:
@@ -478,18 +532,23 @@ class TradingEngine(Application):
                 if event.type == EventType.ERROR:
                     # don't infinite error
                     raise
-                await self.processEvent(
-                    Event(
-                        type=EventType.ERROR,
-                        target=Error(
-                            target=event,
-                            handler=handler,
-                            callback=callback,
-                            exception=e,
-                        ),
-                    )
-                )
                 await asyncio.sleep(1)
+                return [
+                    asyncio.ensure_future(
+                        self.processEvent(
+                            Event(
+                                type=EventType.ERROR,
+                                target=Error(
+                                    target=event,
+                                    handler=handler,
+                                    callback=callback,
+                                    exception=e,
+                                ),
+                            )
+                        )
+                    )
+                ]
+        return ret
 
     async def tick(self) -> AsyncGenerator:
         """helper method to ensure periodic methods execute periodically in absence
@@ -497,6 +556,9 @@ class TradingEngine(Application):
 
         if self._offline():
             # periodics injected manually, see main event loop above
+            while True:
+                yield Event(type=EventType.HEARTBEAT, target=None)
+                await asyncio.sleep(0)
             return
 
         while True:
@@ -509,7 +571,7 @@ class TradingEngine(Application):
         return (
             self._latest
             if self.trading_type == TradingType.BACKTEST
-            else datetime.now()
+            else datetime.now(tz=self.tz)
         )
 
     def start(self) -> None:
@@ -522,7 +584,6 @@ class TradingEngine(Application):
         except KeyboardInterrupt:
             pass
 
+        # FIXME double sending due to wraptick
         # send exit event to all callbacks
-        asyncio.ensure_future(
-            self.processEvent(Event(type=EventType.EXIT, target=None))
-        )
+        # self.event_loop.run_until_complete(self.processEvent(Event(type=EventType.EXIT, target=None)))

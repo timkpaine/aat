@@ -36,6 +36,11 @@ class Error(object):
     def timestamp(self) -> int:
         return self.__timestamp
 
+    @timestamp.setter
+    def timestamp(self, timestamp: datetime) -> None:
+        assert isinstance(timestamp, datetime)
+        self.__timestamp = timestamp
+
     @property
     def type(self) -> DataType:
         return self.__type

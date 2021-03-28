@@ -200,6 +200,12 @@ class Order(object):
 
     def __eq__(self, other: object) -> bool:
         assert isinstance(other, Order)
+
+        # id takes precedence
+        if self.id and self.id == other.id:
+            return True
+
+        # else compare all fields
         return (
             self.id == other.id
             and self.instrument == other.instrument

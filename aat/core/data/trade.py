@@ -62,10 +62,6 @@ class Trade(object):
     # Readonly #
     # ******** #
     @property
-    def timestamp(self) -> datetime:
-        return self.taker_order.timestamp
-
-    @property
     def type(self) -> DataType:
         return self.__type
 
@@ -107,6 +103,15 @@ class Trade(object):
     def id(self, id: str) -> None:
         assert isinstance(id, (str, int))
         self.__id = str(id)
+
+    @property
+    def timestamp(self) -> datetime:
+        return self.taker_order.timestamp
+
+    @timestamp.setter
+    def timestamp(self, timestamp: datetime) -> None:
+        assert isinstance(timestamp, datetime)
+        self.taker_order.timestamp = timestamp
 
     @property
     def maker_orders(self) -> List[Order]:

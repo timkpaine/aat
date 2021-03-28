@@ -1,7 +1,7 @@
 import asyncio
 
 from datetime import datetime
-from typing import Union, Callable, Optional, List, TYPE_CHECKING
+from typing import Callable, Optional, List, TYPE_CHECKING
 from ..config import Side, TradingType, ExitRoutine, InstrumentType
 from ..core import Trade, Instrument, ExchangeType, Order, OrderBook
 from ..exchange import Exchange
@@ -121,28 +121,46 @@ class StrategyUtilsMixin(object):
     def periodic(
         self,
         function: Callable,
-        second: Union[int, str] = 0,
-        minute: Union[int, str] = "*",
-        hour: Union[int, str] = "*",
+        seconds: int = 0,
+        minutes: int = None,
+        hours: int = None,
     ) -> Periodic:
         """periodically run a given async function. NOTE: precise timing
         is NOT guaranteed due to event loop scheduling.
 
         Args:
             function (callable); function to call periodically
-            second (Union[int, str]); second to align periodic to, or '*' for every second
-            minute (Union[int, str]); minute to align periodic to, or '*' for every minute
-            hour (Union[int, str]); hour to align periodic to, or '*' for every hour
+            second (str); second to align periodic to
+            minute (str); minute to align periodic to
+            hour (str); hour to align periodic to
+        """
+        return self._manager.periodic(function, seconds, minutes, hours)
+
+    def at(
+        self,
+        function: Callable,
+        second: int = 0,
+        minute: int = None,
+        hour: int = None,
+    ) -> Periodic:
+        """periodically run a given async function. NOTE: precise timing
+        is NOT guaranteed due to event loop scheduling.
+
+        Args:
+            function (callable); function to call periodically
+            second (str); second to align periodic to
+            minute (str); minute to align periodic to
+            hour (str); hour to align periodic to
 
                 NOTE: this is a rudimentary scheme but should be sufficient. For more
                 complicated scheduling, just install multiple instances of the same periodic
                 e.g. for running on :00, :15, :30, and :45 install
-                    periodic(0, 0, '*')
-                    periodic(0, 15, '*')
-                    periodic(0, 30, '*')
-                    periodic(0, 45, '*')
+                    periodic(0, 0)
+                    periodic(0, 15)
+                    periodic(0, 30)
+                    periodic(0, 45)
         """
-        return self._manager.periodic(function, second, minute, hour)
+        return self._manager.at(function, second, minute, hour)
 
     def restrictTradingHours(
         self,

@@ -3,7 +3,7 @@ from asyncio import Future
 from datetime import datetime
 from typing import Awaitable, Callable, List, Optional
 
-from temporalcache.utils import should_expire  # type: ignore
+from temporalcache.utils import should_expire, calc  # type: ignore
 
 
 class Periodic(object):
@@ -15,18 +15,17 @@ class Periodic(object):
         second: Optional[int],
         minute: Optional[int],
         hour: Optional[int],
+        interval: bool = False,
     ) -> None:
         self._loop = loop
         self._function: Callable[..., Awaitable[None]] = function
-        assert (
-            second != "*" and minute != "*" and hour != "*"
-        ), "Please use None instead of '*'"
         self.__second = second
         self.__minute = minute
         self.__hour = hour
 
         self._last = last_ts
         self._continue = True
+        self._interval = interval
 
     @property
     def second(self) -> Optional[int]:
@@ -46,6 +45,13 @@ class Periodic(object):
     def expires(self, timestamp: datetime) -> bool:
         if (timestamp - self._last).total_seconds() < 1:
             return False
+        if self._interval:
+            total = (timestamp - self._last).total_seconds()
+            if (timestamp - self._last).total_seconds() < 1:
+                return False
+            return total > calc(
+                self.second or 1, self.minute or 0, self.hour or 0, 0, 0, 0, 0
+            )
         return should_expire(self._last, timestamp, self.second, self.minute, self.hour)
 
     async def execute(self, timestamp: datetime) -> Optional[Future]:
@@ -70,6 +76,9 @@ class PeriodicManagerMixin(object):
         """
         ret = 3600
         for p in self._periodics:
+            if p._interval:
+                # 1 for all interval
+                return 1
             if p.second is None:
                 # if any secondly, return 0 right away
                 return 1
