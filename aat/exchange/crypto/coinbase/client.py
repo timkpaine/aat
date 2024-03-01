@@ -508,6 +508,9 @@ class CoinbaseExchangeClient(AuthBase):
                         e = Event(type=EventType.TRADE, target=t)
                         yield e
 
+                    else:
+                        print("TODO: unhandled", x)
+
     async def websocket_trades(self, subscriptions: List[Instrument]):  # type: ignore
         # copy the base subscription template
         subscription = _SUBSCRIPTION.copy()
